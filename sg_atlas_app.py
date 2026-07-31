@@ -27,9 +27,7 @@ of your repo, it doesn't have access to your local machine's files.
 import pandas as pd
 import streamlit as st
 
-from sg_atlas_fragments import (
-    score_all_candidates,
-    predicted_ladder_for_structure,
+from sg_atlas_fragments import score_all_candidates
 )
 CACHE_DB = "sg_atlas_cache.db"
 KNOWN_STRUCTURES_CSV = "known_structures.csv"
