@@ -5,3 +5,4 @@ biopython
 requests
 numpy
 matplotlib
+scipy
