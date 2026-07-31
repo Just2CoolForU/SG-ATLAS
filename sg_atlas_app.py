@@ -207,22 +207,26 @@ else:
     tolerance_pct = st.slider("Match tolerance (%)", min_value=1.0, max_value=15.0, value=5.0, step=0.5)
     run = st.button("Run mass match", type="primary")
 
-    if run:
+if run:
         try:
             observed = [float(x.strip()) for x in masses_input.split(",") if x.strip()]
         except ValueError:
             st.error("Use plain numbers separated by commas.")
             observed = []
-      if observed:
-            pass # We will fix the mass match logic later!              
-     if results:
-                st.caption("Mass-only matching is weaker evidence than precision mode — different cut "
-                           "patterns can coincidentally produce similar fragment weights.")
-                df = format_mass_results_table(results)
-                st.dataframe(df.drop(columns=["_sort_score"]), hide_index=True, width="stretch")
-            else:
-                st.warning("No structures in the cache could be evaluated against these masses.")
-                st.markdown("""
+            
+        results = []
+        
+        if observed:
+            pass # We bypassed this temporarily!
+            
+        if results:
+            st.caption("Mass-only matching is weaker evidence than precision mode — different cut "
+                       "patterns can coincidentally produce similar fragment weights.")
+            df = format_mass_results_table(results)
+            st.dataframe(df.drop(columns=["_sort_score"]), hide_index=True, width="stretch")
+        else:
+            st.warning("No structures in the cache could be evaluated against these masses.")
+            st.markdown("""
 <style>
     /* Metric Cards */
     .metric-card {
@@ -245,4 +249,3 @@ else:
     .badge-low { background-color: #3d0000; color: #ff758f; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
-                
