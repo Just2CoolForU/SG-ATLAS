@@ -215,11 +215,7 @@ else:
             observed = []
         if observed:
             with st.spinner("Matching..."):
-                try:
-                    results = match_observed_fragments(observed, tolerance_pct=tolerance_pct, db_path=CACHE_DB)
-                except Exception as e:
-                    st.error(f"Couldn't run the match — is {CACHE_DB} present? ({e})")
-                    results = []
+              
 
             if results:
                 st.caption("Mass-only matching is weaker evidence than precision mode — different cut "
