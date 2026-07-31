@@ -29,7 +29,6 @@ import streamlit as st
 
 from sg_atlas_fragments import (
     score_all_candidates,
-    match_observed_fragments_by_position,
     predicted_ladder_for_structure,
 )
 CACHE_DB = "sg_atlas_cache.db"
