@@ -28,7 +28,6 @@ import pandas as pd
 import streamlit as st
 
 from sg_atlas_fragments import score_all_candidates
-)
 CACHE_DB = "sg_atlas_cache.db"
 KNOWN_STRUCTURES_CSV = "known_structures.csv"
 
