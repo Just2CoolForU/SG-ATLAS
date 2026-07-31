@@ -233,3 +233,27 @@ else:
                 st.dataframe(df.drop(columns=["_sort_score"]), hide_index=True, width="stretch")
             else:
                 st.warning("No structures in the cache could be evaluated against these masses.")
+                st.markdown("""
+<style>
+    /* Metric Cards */
+    .metric-card {
+        background-color: #1E222A;
+        border-radius: 8px;
+        padding: 16px;
+        border-left: 5px solid #4CAF50;
+        margin-bottom: 12px;
+    }
+    .warning-card {
+        background-color: #2A2118;
+        border-radius: 8px;
+        padding: 16px;
+        border-left: 5px solid #FF9800;
+        margin-bottom: 12px;
+    }
+    /* Confidence Badges */
+    .badge-high { background-color: #1b4332; color: #74c69d; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+    .badge-medium { background-color: #4a3b00; color: #ffd166; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+    .badge-low { background-color: #3d0000; color: #ff758f; padding: 4px 8px; border-radius: 4px; font-weight: bold; }
+</style>
+""", unsafe_allow_html=True)
+                
