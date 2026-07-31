@@ -149,7 +149,7 @@ if mode.startswith("Precision"):
         else:
             with st.spinner("Matching against cached structures..."):
                 try:
-                    results = score_all_candidates_by_position(
+                    results = score_all_candidates(
                         fragments, tolerance_window=tolerance_window, db_path=CACHE_DB,
                     )
                 except Exception as e:
