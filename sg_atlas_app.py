@@ -213,8 +213,8 @@ else:
         except ValueError:
             st.error("Use plain numbers separated by commas.")
             observed = []
-        if observed:
-            with st.spinner("Matching..."):           
+      if observed:
+            pass # We will fix the mass match logic later!              
      if results:
                 st.caption("Mass-only matching is weaker evidence than precision mode — different cut "
                            "patterns can coincidentally produce similar fragment weights.")
