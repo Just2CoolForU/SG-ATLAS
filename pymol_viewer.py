@@ -22,6 +22,8 @@ Optional overlays:
   - spin: slow auto-rotation.
 """
 
+import re
+
 import py3Dmol
 import streamlit as st
 
@@ -121,4 +123,17 @@ def render_pdb_3d(
         view.spin(True)
 
     html = view._make_html()
-    st.iframe(html, height=height, width=width)
+    # py3Dmol bakes a fixed "width: NNNpx; height: NNNpx;" into the div style.
+    # If that doesn't exactly match the actual rendered iframe box (which
+    # varies with the browser/column width), the browser adds scrollbars
+    # inside the box. Make the div fill its container instead, and let the
+    # outer iframe stretch to the real column width -- no more mismatch,
+    # no more scrollbars.
+    html = re.sub(r"width:\s*\d+px", "width: 100%", html)
+    html = re.sub(r"height:\s*\d+px", "height: 100%", html)
+    html = (
+        "<html><head><style>"
+        "html, body { margin:0; padding:0; height:100%; width:100%; overflow:hidden; }"
+        "</style></head><body>" + html + "</body></html>"
+    )
+    st.iframe(html, height=height, width="stretch")
