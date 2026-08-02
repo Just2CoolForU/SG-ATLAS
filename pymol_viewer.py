@@ -1,63 +1,124 @@
 """
 pymol_viewer.py -- interactive 3D structure viewer for the SG-ATLAS
-Streamlit app, built directly on py3Dmol + Streamlit's own components API.
+Streamlit app, built directly on py3Dmol + Streamlit's own st.iframe.
 
 NOTE: this used to go through the `stmol` package as a wrapper around
 py3Dmol. stmol's last PyPI release was August 2022 (confirmed on PyPI) --
 it's unmaintained, and importing it against a current Streamlit version can
-fail outright, which is why the viewer was silently falling back to
-"unavailable". stmol itself is just a thin wrapper around py3Dmol's
-generated HTML embedded via st.iframe(), so this calls
-that directly and drops the unmaintained dependency.
+fail outright. stmol itself is just a thin wrapper around py3Dmol's
+generated HTML embedded in an iframe, so this calls Streamlit's own
+st.iframe() directly and drops the unmaintained dependency.
 
-Design principle (same as the rest of the app): what renders here has to
-match what SG-ATLAS actually computed for this structure --
-  - The full deposited assembly loads and renders (real fibril/filament
-    architecture, protofilaments included).
-  - The specific chains SG-ATLAS classified as "core" (the ones the
-    contact-graph filtering in the analysis pipeline kept, stored in
-    structures.chain_ids) are highlighted in color.
-  - Every other deposited chain is shown dim/grey, so it's visually obvious
-    which part of the structure the SASA profile, fragment predictions, and
-    confidence scores on screen actually correspond to.
+Two color modes, both tied to real cached data (never decorative):
+  - "chain": highlights the core-shielded chains SG-ATLAS's contact-graph
+    filtering actually kept (structures.chain_ids), dims everything else.
+  - "rsa": colors the profiled chain by actual cached Relative Solvent
+    Accessibility (blue = buried, red = exposed), the same RSA values that
+    drive the PK cleavage-site predictions elsewhere in the app.
 
-If core_chains isn't supplied (e.g. viewing a structure with no cached
-profile), it falls back to a plain full-structure cartoon so the viewer
-still works, it just has nothing to highlight.
+Optional overlays:
+  - cleavage_sites: marks specific residues (e.g. predicted PK cleavage
+    sites) with small black spheres directly on the 3D structure.
+  - spin: slow auto-rotation.
 """
 
 import py3Dmol
 import streamlit as st
 
+CHAIN_PALETTE = ["0xE63946", "0x1D3557", "0x2A9D8F", "0xF4A261", "0x6A4C93", "0xE9C46A"]
 
-def render_pdb_3d(pdb_id, core_chains=None, height=440, width=760):
+# RSA bucket -> color, buried (blue) to exposed (red). The 0.45 boundary
+# lines up with sg_atlas_fragments.py's default PK cleavage-site threshold.
+RSA_BUCKETS = [
+    (0.10, "0x08306B"),
+    (0.25, "0x4292C6"),
+    (0.45, "0xC6DBEF"),
+    (0.65, "0xFDBB84"),
+    (999.0, "0xE31A1C"),
+]
+
+
+def _rsa_color(rsa):
+    for cutoff, color in RSA_BUCKETS:
+        if rsa < cutoff:
+            return color
+    return RSA_BUCKETS[-1][1]
+
+
+def render_pdb_3d(
+    pdb_id,
+    core_chains=None,
+    color_mode="chain",
+    profile_chain=None,
+    residue_profile=None,
+    cleavage_sites=None,
+    spin=False,
+    height=560,
+    width=1080,
+):
     """
-    Render `pdb_id` with its core-shielded chains (if provided) highlighted
-    against the rest of the deposited assembly.
+    Render `pdb_id`. Behavior depends on what's supplied:
 
-    pdb_id: 4-character PDB ID, e.g. "6OSJ"
-    core_chains: list of chain letters SG-ATLAS classified as core for this
-        structure (structures.chain_ids from the cache), or None/[] to fall
-        back to a plain full-structure view.
+    core_chains: chain letters SG-ATLAS classified as core for this
+        structure. None/[] falls back to a plain full-structure cartoon.
+    color_mode: "chain" (default) or "rsa". "rsa" requires profile_chain +
+        residue_profile; silently falls back to "chain" if they're missing.
+    profile_chain: the single chain residue_profile/cleavage_sites apply to
+        (the "best_chain" from get_structure_profile) -- SASA is only cached
+        for one representative chain per structure, not all core chains.
+    residue_profile: {resseq: {"aa": ..., "sasa": ...}} for profile_chain.
+    cleavage_sites: list of residue numbers to mark with black spheres
+        (e.g. predicted PK cleavage sites), applied on profile_chain.
+    spin: slow auto-rotation.
     """
     view = py3Dmol.view(query=f"pdb:{pdb_id.lower()}", width=width, height=height)
 
+    use_rsa = color_mode == "rsa" and profile_chain and residue_profile
+
     if core_chains:
-        # Dim every chain first...
         view.setStyle({}, {"cartoon": {"color": "0xD9D9D9", "opacity": 0.35}})
-        # ...then bring the actual core-shielded chains to the front in color.
-        # One consistent color per chain so it's readable at a glance, not a
-        # meaningless rainbow across the whole assembly.
-        palette = ["0xE63946", "0x1D3557", "0x2A9D8F", "0xF4A261", "0x6A4C93", "0xE9C46A"]
-        for i, chain in enumerate(core_chains):
-            view.setStyle(
-                {"chain": chain},
-                {"cartoon": {"color": palette[i % len(palette)]}},
+
+        if use_rsa:
+            # Non-profiled core chains: a single neutral "known core, but no
+            # per-residue data for this exact chain" color -- distinct from
+            # both the dimmed-out non-core chains and the RSA gradient.
+            for chain in core_chains:
+                if chain != profile_chain:
+                    view.setStyle({"chain": chain}, {"cartoon": {"color": "0x999999"}})
+
+            # The profiled chain: real RSA heatmap, bucketed for speed.
+            from sg_atlas_fragments import compute_rsa
+            buckets = {}
+            for resseq, d in residue_profile.items():
+                rsa = compute_rsa(d["sasa"], d["aa"])
+                if rsa is None:
+                    continue
+                buckets.setdefault(_rsa_color(rsa), []).append(resseq)
+            for color, resi_list in buckets.items():
+                view.setStyle(
+                    {"chain": profile_chain, "resi": resi_list},
+                    {"cartoon": {"color": color}},
+                )
+        else:
+            for i, chain in enumerate(core_chains):
+                view.setStyle(
+                    {"chain": chain},
+                    {"cartoon": {"color": CHAIN_PALETTE[i % len(CHAIN_PALETTE)]}},
+                )
+
+        if cleavage_sites and profile_chain:
+            view.addStyle(
+                {"chain": profile_chain, "resi": list(cleavage_sites)},
+                {"sphere": {"scale": 0.35, "color": "0x000000"}},
             )
+
         view.zoomTo({"chain": core_chains})
     else:
         view.setStyle({"cartoon": {"color": "spectrum"}})
         view.zoomTo()
+
+    if spin:
+        view.spin(True)
 
     html = view._make_html()
     st.iframe(html, height=height, width=width)
