@@ -25,8 +25,10 @@ from sg_atlas_fragments import (
 try:
     from pymol_viewer import render_pdb_3d
     VIEWER_AVAILABLE = True
-except Exception:
+    VIEWER_IMPORT_ERROR = None
+except Exception as e:
     VIEWER_AVAILABLE = False
+    VIEWER_IMPORT_ERROR = f"{type(e).__name__}: {e}"
 
 DB_PATH = "sg_atlas_cache.db"
 CSV_PATH = "known_structures.csv"
@@ -146,13 +148,14 @@ def get_structure_profile(pdb_id):
     est_mass = sum(RESIDUE_MASS.get(aa, 110.0) for aa in profile.values()) + WATER_MASS
 
     import json
-    core_chain_count = len(json.loads(chain_row[0])) if chain_row else len(by_chain)
+    core_chain_ids = json.loads(chain_row[0]) if chain_row else list(by_chain.keys())
 
     return {
         "best_chain": best_chain,
         "modeled_residue_count": len(profile),
         "residue_range": (residues_sorted[0], residues_sorted[-1]),
-        "core_chain_count": core_chain_count,
+        "core_chain_count": len(core_chain_ids),
+        "core_chain_ids": core_chain_ids,
         "est_mass_kda": round(est_mass / 1000, 2),
     }
 
@@ -364,6 +367,11 @@ if picked != selected_pdb:
 
 left_col, right_col = st.columns([1.7, 1], gap="large")
 
+# Computed once here (cached) and reused by both the viewer and the
+# Macromolecule Content card below, so what you see in 3D and what the
+# card claims about chain count always agree.
+profile = get_structure_profile(selected_pdb)
+
 # ---------------------------------------------------------------------------
 # Left column: real 3D viewer + ranked candidates table
 # ---------------------------------------------------------------------------
@@ -371,7 +379,8 @@ with left_col:
     st.markdown('<div class="viewer-box">', unsafe_allow_html=True)
     if VIEWER_AVAILABLE:
         try:
-            render_pdb_3d(selected_pdb)
+            core_chains = profile["core_chain_ids"] if profile else None
+            render_pdb_3d(selected_pdb, core_chains=core_chains)
         except Exception as e:
             st.markdown(
                 f'<div class="viewer-fallback">Could not load live structure for '
@@ -381,11 +390,22 @@ with left_col:
             )
     else:
         st.markdown(
-            '<div class="viewer-fallback">3D viewer unavailable -- stmol / py3Dmol '
-            'not installed. Check requirements.txt.</div>',
+            f'<div class="viewer-fallback">3D viewer import failed.<br>'
+            f'<code>{VIEWER_IMPORT_ERROR}</code><br><br>'
+            f'Check "Manage app" &rarr; logs on Streamlit Cloud for the full '
+            f'traceback if this doesn\'t explain it.</div>',
             unsafe_allow_html=True,
         )
     st.markdown('</div>', unsafe_allow_html=True)
+    if profile:
+        st.caption(
+            f"Colored chains ({', '.join(profile['core_chain_ids'])}) are the "
+            f"core-shielded region SG-ATLAS actually computed a SASA profile for. "
+            f"Grey chains are part of the deposited assembly but weren't included "
+            f"in this analysis."
+        )
+    else:
+        st.caption(f"No cached SASA profile for {selected_pdb} -- showing the raw deposited structure.")
 
     st.write("")
     st.subheader("All candidates, ranked by confidence")
@@ -432,7 +452,6 @@ with right_col:
         rcsb_url = f"https://www.rcsb.org/structure/{selected_pdb}"
         st.markdown(f"[View full entry on RCSB]({rcsb_url})")
 
-    profile = get_structure_profile(selected_pdb)
     with st.container(border=True):
         st.markdown('<div class="card-title">Macromolecule Content (from cache)</div>', unsafe_allow_html=True)
         if profile:
