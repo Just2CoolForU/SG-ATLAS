@@ -1,20 +1,25 @@
 """
 pymol_viewer.py -- interactive 3D structure viewer for the SG-ATLAS
-Streamlit app, built on py3Dmol/stmol (3Dmol.js under the hood).
+Streamlit app, built directly on py3Dmol + Streamlit's own components API.
 
-This isn't just "load whatever PDB ID is on screen" -- the whole point is
-that what you SEE has to match what SG-ATLAS actually computed for that
-structure:
+NOTE: this used to go through the `stmol` package as a wrapper around
+py3Dmol. stmol's last PyPI release was August 2022 (confirmed on PyPI) --
+it's unmaintained, and importing it against a current Streamlit version can
+fail outright, which is why the viewer was silently falling back to
+"unavailable". stmol itself is just a thin wrapper around py3Dmol's
+generated HTML embedded via st.iframe(), so this calls
+that directly and drops the unmaintained dependency.
 
-  - The full deposited assembly loads and renders (so you still see the
-    real fibril/filament architecture, protofilaments included).
+Design principle (same as the rest of the app): what renders here has to
+match what SG-ATLAS actually computed for this structure --
+  - The full deposited assembly loads and renders (real fibril/filament
+    architecture, protofilaments included).
   - The specific chains SG-ATLAS classified as "core" (the ones the
     contact-graph filtering in the analysis pipeline kept, stored in
     structures.chain_ids) are highlighted in color.
   - Every other deposited chain is shown dim/grey, so it's visually obvious
     which part of the structure the SASA profile, fragment predictions, and
-    confidence scores on screen actually correspond to -- not the whole
-    assembly, just the highlighted subset.
+    confidence scores on screen actually correspond to.
 
 If core_chains isn't supplied (e.g. viewing a structure with no cached
 profile), it falls back to a plain full-structure cartoon so the viewer
@@ -22,7 +27,7 @@ still works, it just has nothing to highlight.
 """
 
 import py3Dmol
-from stmol import showmol
+import streamlit as st
 
 
 def render_pdb_3d(pdb_id, core_chains=None, height=440, width=760):
@@ -35,7 +40,7 @@ def render_pdb_3d(pdb_id, core_chains=None, height=440, width=760):
         structure (structures.chain_ids from the cache), or None/[] to fall
         back to a plain full-structure view.
     """
-    view = py3Dmol.view(query=f"pdb:{pdb_id.lower()}")
+    view = py3Dmol.view(query=f"pdb:{pdb_id.lower()}", width=width, height=height)
 
     if core_chains:
         # Dim every chain first...
@@ -54,4 +59,5 @@ def render_pdb_3d(pdb_id, core_chains=None, height=440, width=760):
         view.setStyle({"cartoon": {"color": "spectrum"}})
         view.zoomTo()
 
-    showmol(view, height=height, width=width)
+    html = view._make_html()
+    st.iframe(html, height=height, width=width)
