@@ -55,33 +55,33 @@ def inject_css():
 
         .top-nav {
             display: flex; gap: 28px; padding-bottom: 0.75rem;
-            border-bottom: 1px solid #dddddd; margin-bottom: 1.75rem;
-            font-size: 16px; font-weight: 700; color: #111111;
+            border-bottom: 1px solid var(--border-color, #dddddd); margin-bottom: 1.75rem;
+            font-size: 16px; font-weight: 700; color: var(--text-color);
         }
         .top-nav span.active { border-bottom: 3px solid #2e7d32; padding-bottom: 6px; }
         .top-nav span.inactive { opacity: 0.55; }
 
-        .header-title { font-size: 2.2rem; font-weight: 800; color: #111111; margin: 0; line-height: 1.15; }
-        .header-subtitle { font-size: 1.05rem; color: #666666; margin: 2px 0 0 0; }
-        .confidence-plain { font-size: 1.35rem; font-weight: 800; color: #111111; text-align: right; }
-        .confidence-plain .pct { color: #1e3c72; }
+        .header-title { font-size: 2.2rem; font-weight: 800; color: var(--text-color); margin: 0; line-height: 1.15; }
+        .header-subtitle { font-size: 1.05rem; color: var(--text-color); opacity: 0.65; margin: 2px 0 0 0; }
+        .confidence-plain { font-size: 1.35rem; font-weight: 800; color: var(--text-color); text-align: right; }
+        .confidence-plain .pct { color: var(--primary-color, #1e3c72); }
 
         .detail-item {
             display: flex; justify-content: space-between; padding: 7px 0;
-            border-bottom: 1px solid #eeeeee; font-size: 14px; color: #111111;
+            border-bottom: 1px solid var(--border-color, #eeeeee); font-size: 14px; color: var(--text-color);
         }
         .detail-item:last-child { border-bottom: none; }
-        .detail-label { color: #555555; }
+        .detail-label { color: var(--text-color); opacity: 0.65; }
         .detail-value { font-weight: 600; }
-        .detail-value.na { color: #999999; font-weight: 400; font-style: italic; }
+        .detail-value.na { opacity: 0.55; font-weight: 400; font-style: italic; }
 
-        .card-title { font-weight: 700; font-size: 15px; color: #111111; margin-bottom: 6px; }
-        .not-cached-note { font-size: 12.5px; color: #888888; margin-top: 6px; }
-        .not-cached-note a { color: #1e3c72; }
+        .card-title { font-weight: 700; font-size: 15px; color: var(--text-color); margin-bottom: 6px; }
+        .not-cached-note { font-size: 12.5px; color: var(--text-color); opacity: 0.6; margin-top: 6px; }
+        .not-cached-note a { color: var(--primary-color, #1e3c72); }
 
-        .viewer-fallback { color: #999999; font-family: sans-serif; text-align: center; padding: 40px; }
+        .viewer-fallback { color: var(--text-color); opacity: 0.55; font-family: sans-serif; text-align: center; padding: 40px; }
 
-        .footer-disclaimer { font-size: 12.5px; color: #999999; margin-top: 1.5rem; }
+        .footer-disclaimer { font-size: 12.5px; color: var(--text-color); opacity: 0.55; margin-top: 1.5rem; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -260,6 +260,20 @@ if not all_ids:
         "cache database is committed to the repo alongside this file."
     )
     st.stop()
+
+# Category (polymorph family) -> list of cached structure IDs, for the
+# two-stage switcher below. Same "Uncategorized" fallback used everywhere
+# else in the app rather than guessing at a real polymorph name.
+known_lookup = known_df.set_index("pdb_id")["polymorph_name"].to_dict()
+
+def category_for(pdb_id):
+    val = known_lookup.get(pdb_id)
+    return val if isinstance(val, str) and val.strip() else "Uncategorized"
+
+category_map = {}
+for pid in all_ids:
+    category_map.setdefault(category_for(pid), []).append(pid)
+categories = sorted(category_map.keys())
 
 # ---------------------------------------------------------------------------
 # Nav (decorative, matches reference)
@@ -447,28 +461,22 @@ if not candidates_df.empty:
             icon="\U0001F9EC",
         )
 
-col_h1, col_h2 = st.columns([3, 1])
+col_h1, col_h2 = st.columns([2.2, 1])
 with col_h1:
     st.markdown(f'<p class="header-title">{selected_pdb}</p>', unsafe_allow_html=True)
     st.markdown(f'<p class="header-subtitle">{polymorph_name}</p>', unsafe_allow_html=True)
 with col_h2:
-    if score_for_selected is not None:
-        st.markdown(
-            f'<div class="confidence-plain"><span class="pct">{score_for_selected*100:.0f}%</span> '
-            f'Match Score</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        st.markdown('<div class="confidence-plain" style="color:#999;">Not yet matched</div>', unsafe_allow_html=True)
+    # Two-stage switcher: pick a category (polymorph family) first, then
+    # the structure dropdown only shows cached structures in that category.
+    # Sits beside the header instead of full-width below it.
+    current_category = category_for(selected_pdb)
+    cat_index = categories.index(current_category) if current_category in categories else 0
+    picked_category = st.selectbox("Category", categories, index=cat_index, key="category_select")
 
-# switcher, kept low-key: lets you browse any of the 201 cached structures
-# directly, independent of the matching results above
-picked = st.selectbox(
-    "View a different cached structure",
-    options=all_ids,
-    index=all_ids.index(selected_pdb),
-    label_visibility="collapsed",
-)
+    options_for_cat = category_map[picked_category]
+    struct_index = options_for_cat.index(selected_pdb) if selected_pdb in options_for_cat else 0
+    picked = st.selectbox("Structure", options_for_cat, index=struct_index, key="structure_select")
+
 if picked != selected_pdb:
     st.session_state["selected_pdb"] = picked
     st.rerun()
@@ -533,7 +541,7 @@ with vc2:
         "Mark predicted PK cleavage sites", value=False, disabled=(profile is None)
     )
 with vc3:
-    spin = st.checkbox("Auto-rotate", value=False)
+    spin = st.checkbox("Auto-rotate", value=True)
 
 cleavage_sites = None
 if show_cleavage and raw_profile:
