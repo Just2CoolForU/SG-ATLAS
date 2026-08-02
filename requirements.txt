@@ -6,5 +6,4 @@ requests
 numpy
 matplotlib
 scipy
-stmol
 py3Dmol
