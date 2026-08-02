@@ -27,14 +27,20 @@ METHOD (and its real limitations -- read before trusting output):
      computed from standard average amino acid residue masses (the same
      constants used by tools like ExPASy's MW calculator).
   4. A lab's observed fragment masses (from SDS-PAGE or MS) are matched
-     against every cached structure's predicted ladder, scoring how many
-     observed fragments have a close-mass predicted counterpart.
+     against every cached structure's predicted ladder. The reported score
+     is a binomial-test-and-FDR-corrected confidence, not a raw fraction
+     matched -- many amyloid polymorphs share similar core lengths and
+     produce near-identical ladders, so a raw fraction routinely ties
+     across dozens of structures and can't tell a distinctive match from
+     a generic one. The corrected score discounts matches against
+     structures whose predicted bands were likely to be hit by chance
+     anyway.
 
-This is a hypothesis-ranking tool, not a diagnostic. A high match score
-means "this structure's predicted ladder is consistent with what you
-observed" -- it does not by itself prove the sample IS that structural
-class, especially since predicted cleavage-site propensity is itself an
-approximation (see point 2).
+This is a hypothesis-ranking tool, not a diagnostic. A high confidence
+score means "this structure's predicted ladder is a statistically
+distinctive match for what you observed" -- it does not by itself prove
+the sample IS that structural class, especially since predicted
+cleavage-site propensity is itself an approximation (see point 2).
 """
 import sqlite3
 from scipy.stats import binom, false_discovery_control
@@ -264,23 +270,69 @@ def theoretical_max_fragment(profile_chain):
     return sum(RESIDUE_MASS.get(d["aa"], 110.0) for d in profile_chain.values()) + WATER_MASS
 
 
+def compute_mass_chance_probability(predicted_masses, tolerance_pct, full_range_da):
+    """
+    Null-model probability that a uniformly random mass, drawn from
+    [0, full_range_da], would land within tolerance_pct of *some* predicted
+    band -- the mass-domain equivalent of the "covered_positions / chain_length"
+    calculation match_fragments_by_position() already does for residue
+    boundaries. Overlapping tolerance windows (common when a ladder has
+    several similarly-sized fragments) are merged so they aren't double-counted.
+
+    full_range_da is normally sum(predicted_masses) -- since PK fragments
+    partition the modeled chain, that sum equals the full modeled region's
+    mass, giving each structure its own fair, self-contained null model
+    rather than an arbitrary shared cutoff.
+    """
+    if not predicted_masses or full_range_da <= 0:
+        return 0.0
+    intervals = sorted(
+        (max(0.0, m - m * tolerance_pct / 100.0), m + m * tolerance_pct / 100.0)
+        for m in predicted_masses
+    )
+    merged = []
+    for start, end in intervals:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    covered = sum(end - start for start, end in merged)
+    return min(covered / full_range_da, 1.0)
+
+
 def match_observed_fragments(observed_masses, tolerance_pct=5.0, rsa_threshold=0.45, db_path="sg_atlas_cache.db"):
     """
     The core lab-facing feature: given a list of fragment masses a
-    researcher actually observed, score every cached structure's predicted ladder.
+    researcher actually observed, score every cached structure's predicted
+    ladder.
+
+    Confidence is a statistically-corrected score (binomial test against a
+    per-structure chance-of-random-match null model, then Benjamini-Hochberg
+    FDR correction across all candidate structures) -- the same rigor
+    match_fragments_by_position() already uses, not a raw "fraction
+    matched" number. That distinction matters here: many amyloid polymorphs
+    share very similar core lengths and produce near-identical 2-fragment
+    ladders (one large core piece, one small terminal piece), so a raw
+    match fraction routinely ties across dozens of structures at once --
+    it can't tell a distinctive match from a generic one. The
+    statistically-corrected score can: a match against a structure whose
+    predicted bands are common/easy-to-hit gets discounted relative to one
+    whose bands are narrow and specific. raw_match_fraction is still
+    returned alongside it for anyone who wants the simple number.
     """
     conn = sqlite3.connect(db_path)
     cur = conn.execute("SELECT DISTINCT pdb_id FROM structures WHERE mode='full-core'")
     all_pdb_ids = [row[0] for row in cur.fetchall()]
     conn.close()
 
-    results = []
+    prelim = []
     for pdb_id in all_pdb_ids:
         ladder_info = predicted_ladder_for_structure(pdb_id, rsa_threshold=rsa_threshold, db_path=db_path)
         if ladder_info is None or not ladder_info["fragments"]:
             continue
         predicted_masses = [f["mass_da"] for f in ladder_info["fragments"]]
-        max_possible = max(predicted_masses) 
+        max_possible = max(predicted_masses)
+        full_range = sum(predicted_masses)  # = total modeled chain mass (fragments partition it)
 
         matched = 0
         evaluable = 0
@@ -300,15 +352,30 @@ def match_observed_fragments(observed_masses, tolerance_pct=5.0, rsa_threshold=0
             match_details.append({"observed": obs, "closest_predicted": best, "pct_diff": round(pct_diff, 1),
                                     "matched": is_match, "exceeds_max": False})
 
-        score = matched / evaluable if evaluable > 0 else 0.0
-        results.append({
-            "pdb_id": pdb_id, "score": round(score, 3),
+        if evaluable == 0:
+            continue  # nothing evaluable here -- exclude rather than report a hollow 0%
+
+        chance_probability = compute_mass_chance_probability(predicted_masses, tolerance_pct, full_range)
+        p_value, _ = compute_match_confidence(evaluable, matched, chance_probability)
+        raw_match_fraction = matched / evaluable
+
+        prelim.append({
+            "pdb_id": pdb_id, "raw_match_fraction": round(raw_match_fraction, 3),
             "matched_count": matched, "total_observed": len(observed_masses),
-            "evaluable_count": evaluable,
-            "details": match_details,
+            "evaluable_count": evaluable, "details": match_details,
+            "chance_probability": round(chance_probability, 4), "p_value": p_value,
         })
 
-    return sorted(results, key=lambda r: (-r["evaluable_count"], -r["score"]))
+    raw_p_values = [r["p_value"] for r in prelim]
+    adjusted_p_values = false_discovery_control(raw_p_values, method="bh") if raw_p_values else []
+
+    for r, adj_p in zip(prelim, adjusted_p_values):
+        adj_p = max(float(adj_p), r["p_value"])  # adjusted can't be lower than raw
+        r["adj_p"] = round(adj_p, 5)
+        r["score"] = round(max(0.0, 1.0 - adj_p), 4)
+        r["low_power_warning"] = r["evaluable_count"] <= 2
+
+    return sorted(prelim, key=lambda r: (-r["score"], -r["evaluable_count"]))
 
 
 if __name__ == "__main__":
