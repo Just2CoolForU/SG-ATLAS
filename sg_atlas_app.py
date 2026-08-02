@@ -241,7 +241,7 @@ if mode == "Mass weights (MS/gel)":
         value="4200, 8100, 12300",
     )
     tolerance = st.slider("Match tolerance (%)", 1.0, 15.0, 5.0, 0.5)
-    run_clicked = st.button("Run test again", type="primary")
+    run_clicked = st.button("Match Profile", type="primary")
 
     if "match_results" not in st.session_state or run_clicked or st.session_state.get("last_mode") != "mass":
         masses = parse_masses(masses_input)
@@ -270,7 +270,7 @@ else:
         value="37-97, 40-90",
     )
     tol_window = st.slider("Position tolerance (residues)", 0, 5, 2, 1)
-    run_clicked = st.button("Run test again", type="primary")
+    run_clicked = st.button("Match Profile", type="primary")
 
     if "match_results" not in st.session_state or run_clicked or st.session_state.get("last_mode") != "position":
         positions = parse_positions(positions_input)
@@ -335,6 +335,26 @@ for r in results:
     if r["pdb_id"] == selected_pdb:
         score_for_selected = r["score"]
         break
+
+# Clear, hard-to-miss confirmation of what's currently being shown -- shown
+# every time results exist (not just right after clicking), so it stays
+# accurate even if you've browsed away from the #1 match via the switcher
+# below. Plus a one-off toast on the actual click announcing the top match,
+# so a fresh result is unmistakable before you even scroll down.
+if not candidates_df.empty:
+    if score_for_selected is not None:
+        st.success(
+            f"**Currently viewing: {selected_pdb}** \u2014 {polymorph_name} "
+            f"\u2014 {score_for_selected*100:.0f}% confidence"
+        )
+    else:
+        st.info(f"**Currently viewing: {selected_pdb}** \u2014 {polymorph_name} (not in current match results)")
+    if run_clicked:
+        top_row = candidates_df.iloc[0]
+        st.toast(
+            f"Top match: {top_row['Structure']} ({top_row['Confidence']*100:.0f}% confidence)",
+            icon="\U0001F9EC",
+        )
 
 col_h1, col_h2 = st.columns([3, 1])
 with col_h1:
@@ -550,7 +570,7 @@ if not candidates_df.empty:
         caption_text += "  ⚠ = few trials for this structure; confidence is unreliable at this coverage."
     st.caption(caption_text)
 else:
-    st.info("Enter your observed data above and run the test to populate this table.")
+    st.info("Enter your observed data above and click Match Profile to populate this table.")
 
 st.markdown(
     '<div class="footer-disclaimer">SG-ATLAS is a hypothesis-generation aid for choosing '
