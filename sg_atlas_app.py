@@ -18,6 +18,7 @@ import sqlite3
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import requests
 import streamlit as st
 
 from sg_atlas_fragments import (
@@ -179,6 +180,86 @@ def get_predicted_ladder(pdb_id):
     from sg_atlas_fragments.py -- same function the ranked-candidates table
     is scored against, not a separate approximation."""
     return predicted_ladder_for_structure(pdb_id, mode=MODE, db_path=DB_PATH)
+
+
+RCSB_ENTRY_API = "https://data.rcsb.org/rest/v1/core/entry/"
+
+
+def _deep_find_first(obj, key_substrings):
+    """Recursively search a nested dict/list for the first key whose name
+    contains any of key_substrings (case-insensitive), returning (key, value).
+    Used instead of hardcoding one exact JSON path, since RCSB's schema
+    varies by entry/method and a wrong hardcoded path would silently show
+    'Not available' anyway -- this is more resilient without ever making up
+    a number. Returns (None, None) if nothing matches."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if any(s in k.lower() for s in key_substrings) and not isinstance(v, (dict, list)):
+                return k, v
+        for v in obj.values():
+            found = _deep_find_first(v, key_substrings)
+            if found[0] is not None:
+                return found
+    elif isinstance(obj, list):
+        for item in obj:
+            found = _deep_find_first(item, key_substrings)
+            if found[0] is not None:
+                return found
+    return None, None
+
+
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def get_live_rcsb_data(pdb_id):
+    """Real, per-structure experimental method, atom count, EM software, and
+    MolProbity validation metrics -- fetched live from RCSB's public Data
+    API, not stored in our local cache. Cached for a day per PDB ID so
+    switching structures doesn't re-fetch on every rerun, but each structure
+    still gets its own real numbers instead of one static block for all of
+    them. Returns None on any network/parsing failure so callers can fall
+    back to the honest 'not available' messaging -- same pattern already
+    used for the 3D viewer fetch below."""
+    try:
+        resp = requests.get(f"{RCSB_ENTRY_API}{pdb_id}", timeout=8)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return None
+
+    out = {}
+
+    # Experimental method -- real value when present, else the app's
+    # existing "Cryo-Electron Microscopy" default (true for this dataset).
+    exptl = data.get("exptl")
+    if isinstance(exptl, list) and exptl and exptl[0].get("method"):
+        out["method"] = exptl[0]["method"]
+
+    # Deposited atom count -- a real, well-populated RCSB field.
+    entry_info = data.get("rcsb_entry_info") or {}
+    out["atom_count"] = entry_info.get("deposited_atom_count")
+
+    # EM software used for reconstruction/refinement (name + classification),
+    # only present on EM entries.
+    em_software = data.get("em_software")
+    if isinstance(em_software, list) and em_software:
+        names = []
+        for sw in em_software:
+            name = sw.get("name")
+            classification = sw.get("classification")
+            if name:
+                names.append(f"{name} ({classification})" if classification else name)
+        if names:
+            out["em_software"] = ", ".join(sorted(set(names)))
+
+    # MolProbity validation metrics -- searched defensively rather than off
+    # one hardcoded path, since coverage/schema varies by entry and method.
+    _, clashscore = _deep_find_first(data, ["clashscore"])
+    _, rama_outliers = _deep_find_first(data, ["ramachandran_outliers", "rama_outliers"])
+    _, rotamer_outliers = _deep_find_first(data, ["rotamer_outliers", "rota_outliers"])
+    out["clashscore"] = clashscore
+    out["rama_outliers_pct"] = rama_outliers
+    out["rotamer_outliers_pct"] = rotamer_outliers
+
+    return out
 
 
 LADDER_MARKERS_DA = [2000, 3000, 5000, 7000, 10000, 15000, 20000, 25000]
@@ -645,36 +726,97 @@ with info_col1:
             st.markdown('<div class="detail-value na">Not cached for this structure</div>', unsafe_allow_html=True)
 
 with info_col2:
+    live_data = get_live_rcsb_data(selected_pdb)
+
     with st.container(border=True):
         st.markdown('<div class="card-title">Experimental Data</div>', unsafe_allow_html=True)
         resolution = curated_row["resolution"].iloc[0] if not curated_row.empty else None
+        method = (live_data or {}).get("method") or "Cryo-Electron Microscopy"
+        atom_count = (live_data or {}).get("atom_count")
+        em_software = (live_data or {}).get("em_software")
+
+        atom_count_display = f"{atom_count:,}" if isinstance(atom_count, (int, float)) else None
+        # Combine software + atom count into one row (matches the card's
+        # existing layout); show whichever half we actually have.
+        if em_software and atom_count_display:
+            software_value = f"{em_software} &middot; {atom_count_display} atoms"
+        elif em_software:
+            software_value = em_software
+        elif atom_count_display:
+            software_value = f"{atom_count_display} atoms"
+        else:
+            software_value = None
+
         st.markdown(
             f"""
             <div class="detail-item"><div class="detail-label">Method</div>
-                <div class="detail-value">Cryo-Electron Microscopy</div></div>
+                <div class="detail-value">{method}</div></div>
             <div class="detail-item"><div class="detail-label">Resolution</div>
                 <div class="detail-value">{f'{resolution:.2f} Å' if resolution else 'N/A'}</div></div>
             <div class="detail-item"><div class="detail-label">EM software, atom count</div>
-                <div class="detail-value na">Not cached</div></div>
+                <div class="detail-value{'' if software_value else ' na'}">{software_value or 'Not available from RCSB for this entry'}</div></div>
             """,
             unsafe_allow_html=True,
         )
-        st.markdown(
-            f'<div class="not-cached-note">Software versions and full validation metrics '
-            f'live in the wwPDB validation report, not in this cache. '
-            f'<a href="{rcsb_url}" target="_blank">View on RCSB</a></div>',
-            unsafe_allow_html=True,
-        )
+        if live_data is None:
+            st.markdown(
+                f'<div class="not-cached-note">Couldn\'t reach RCSB for live data just now '
+                f'(network hiccup or rate limit) -- resolution above is still from our own cache. '
+                f'<a href="{rcsb_url}" target="_blank">View on RCSB</a></div>',
+                unsafe_allow_html=True,
+            )
+        elif not software_value:
+            st.markdown(
+                f'<div class="not-cached-note">RCSB doesn\'t expose EM software/atom count for '
+                f'this entry through the Data API. '
+                f'<a href="{rcsb_url}" target="_blank">View on RCSB</a></div>',
+                unsafe_allow_html=True,
+            )
 
     with st.container(border=True):
         st.markdown('<div class="card-title">Structure Validation</div>', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="not-cached-note">Clashscore, Ramachandran outliers, and Q-score '
-            'are computed by wwPDB validation pipelines and are not stored locally -- '
-            f'showing a made-up number here would be worse than not showing one. '
-            f'<a href="{rcsb_url}" target="_blank">Full Validation Report on RCSB</a></div>',
-            unsafe_allow_html=True,
-        )
+        clashscore = (live_data or {}).get("clashscore")
+        rama = (live_data or {}).get("rama_outliers_pct")
+        rotamer = (live_data or {}).get("rotamer_outliers_pct")
+        have_any_metric = any(v is not None for v in (clashscore, rama, rotamer))
+
+        if have_any_metric:
+            def _fmt(v, suffix=""):
+                return f"{v}{suffix}" if v is not None else "N/A"
+
+            st.markdown(
+                f"""
+                <div class="detail-item"><div class="detail-label">Clashscore</div>
+                    <div class="detail-value">{_fmt(clashscore)}</div></div>
+                <div class="detail-item"><div class="detail-label">Ramachandran outliers</div>
+                    <div class="detail-value">{_fmt(rama, '%')}</div></div>
+                <div class="detail-item"><div class="detail-label">Rotamer outliers</div>
+                    <div class="detail-value">{_fmt(rotamer, '%')}</div></div>
+                """,
+                unsafe_allow_html=True,
+            )
+            st.markdown(
+                f'<div class="not-cached-note">Live from RCSB\'s Data API, not stored in our '
+                f'cache. Q-score and full geometry breakdowns aren\'t exposed through this API '
+                f'-- see the full report for those. '
+                f'<a href="{rcsb_url}" target="_blank">Full Validation Report on RCSB</a></div>',
+                unsafe_allow_html=True,
+            )
+        elif live_data is None:
+            st.markdown(
+                '<div class="not-cached-note">Couldn\'t reach RCSB for live validation data just '
+                f'now (network hiccup or rate limit). '
+                f'<a href="{rcsb_url}" target="_blank">Full Validation Report on RCSB</a></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="not-cached-note">Clashscore, Ramachandran outliers, and Q-score '
+                'for this entry aren\'t exposed through RCSB\'s Data API and aren\'t stored '
+                f'locally -- showing a made-up number here would be worse than not showing one. '
+                f'<a href="{rcsb_url}" target="_blank">Full Validation Report on RCSB</a></div>',
+                unsafe_allow_html=True,
+            )
 
 st.write("")
 
