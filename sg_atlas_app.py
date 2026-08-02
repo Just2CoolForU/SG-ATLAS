@@ -16,11 +16,13 @@ values.
 
 import sqlite3
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
 import streamlit as st
 
 from sg_atlas_fragments import (
     match_observed_fragments, score_all_candidates, RESIDUE_MASS, WATER_MASS,
-    compute_rsa, predict_cleavage_sites,
+    compute_rsa, predict_cleavage_sites, predicted_ladder_for_structure,
 )
 
 try:
@@ -171,6 +173,83 @@ def run_position_matching(observed_fragments_tuple, tolerance_window):
     )
 
 
+@st.cache_data
+def get_predicted_ladder(pdb_id):
+    """The actual predicted PK fragment ladder for this structure, straight
+    from sg_atlas_fragments.py -- same function the ranked-candidates table
+    is scored against, not a separate approximation."""
+    return predicted_ladder_for_structure(pdb_id, mode=MODE, db_path=DB_PATH)
+
+
+LADDER_MARKERS_DA = [2000, 3000, 5000, 7000, 10000, 15000, 20000, 25000]
+
+
+def compute_band_matches(predicted_masses, observed_masses, tolerance_pct):
+    """For each observed mass, is there a predicted band within tolerance?
+    Same pass/fail rule match_observed_fragments() uses per-structure,
+    applied here just for the currently-viewed structure so the gel and the
+    ranked table are always telling the same story."""
+    out = []
+    for obs in observed_masses:
+        if not predicted_masses or obs <= 0:
+            out.append((obs, False, None))
+            continue
+        closest = min(predicted_masses, key=lambda p: abs(p - obs))
+        pct_diff = abs(closest - obs) / obs * 100
+        out.append((obs, pct_diff <= tolerance_pct, closest))
+    return out
+
+
+def draw_fragment_gel(pdb_id, predicted_fragments, observed_masses=None, tolerance_pct=5.0):
+    """Simulated SDS-PAGE-style gel: a reference ladder lane, a lane of this
+    structure's predicted PK digestion bands, and (in mass-matching mode) a
+    lane of your observed bands colored green/red by whether they land near
+    a predicted band. Larger fragments sit near the top, matching how they'd
+    actually run on a real gel -- less migration for bigger fragments."""
+    predicted_masses = [f["mass_da"] for f in predicted_fragments] if predicted_fragments else []
+
+    lanes = ["Ladder", f"Predicted\n{pdb_id}"]
+    if observed_masses:
+        lanes.append("Observed")
+
+    fig, ax = plt.subplots(figsize=(1.7 * len(lanes) + 1.4, 5.2))
+    fig.patch.set_facecolor("#161616")
+    ax.set_facecolor("#161616")
+    lane_w = 0.55
+
+    for m in LADDER_MARKERS_DA:
+        y = np.log10(m)
+        ax.hlines(y, -lane_w / 2, lane_w / 2, color="#f4d35e", linewidth=2.2)
+        ax.text(-lane_w / 2 - 0.12, y, f"{m/1000:g}k", color="#f4d35e",
+                 fontsize=8, va="center", ha="right")
+
+    if predicted_masses:
+        for m in predicted_masses:
+            y = np.log10(m)
+            ax.hlines(y, 1 - lane_w / 2, 1 + lane_w / 2, color="#eaeaea", linewidth=4.5)
+    else:
+        ax.text(1, 0.5, "not cached", color="#777777", fontsize=8, ha="center",
+                 transform=ax.get_xaxis_transform())
+
+    if observed_masses:
+        matches = compute_band_matches(predicted_masses, observed_masses, tolerance_pct)
+        for obs, matched, _ in matches:
+            y = np.log10(obs)
+            color = "#5ec962" if matched else "#e34a4a"
+            ax.hlines(y, 2 - lane_w / 2, 2 + lane_w / 2, color=color, linewidth=4.5)
+            ax.text(2 + lane_w / 2 + 0.12, y, f"{obs:.0f}", color=color, fontsize=8, va="center")
+
+    ax.set_xlim(-1.15, len(lanes) - 0.25)
+    ax.set_xticks(range(len(lanes)))
+    ax.set_xticklabels(lanes, color="white", fontsize=9)
+    ax.set_yticks([])
+    ax.tick_params(colors="white", length=0)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    fig.tight_layout()
+    return fig
+
+
 known_df = load_known_structures()
 curated_df = load_curated_atlas()
 all_ids = load_structure_ids()
@@ -200,10 +279,9 @@ st.markdown(
 # which is why the app looked static. Not doing that again.
 # ---------------------------------------------------------------------------
 st.subheader("Match your data against the cache")
-mode = st.radio(
+mode = st.selectbox(
     "Input type",
     ["Mass weights (MS/gel)", "Residue positions (boundaries)"],
-    horizontal=True,
 )
 
 def parse_masses(text):
@@ -243,8 +321,15 @@ if mode == "Mass weights (MS/gel)":
     tolerance = st.slider("Match tolerance (%)", 1.0, 15.0, 5.0, 0.5)
     run_clicked = st.button("Match Profile", type="primary")
 
+    # Tracked live (not gated on the button) so the fragment-bands gel below
+    # reflects whatever's currently typed, not just the last matched run.
+    gel_observed_masses = parse_masses(masses_input)
+    gel_tolerance_pct = tolerance
+    st.session_state["gel_observed_masses"] = gel_observed_masses
+    st.session_state["gel_tolerance_pct"] = gel_tolerance_pct
+
     if "match_results" not in st.session_state or run_clicked or st.session_state.get("last_mode") != "mass":
-        masses = parse_masses(masses_input)
+        masses = gel_observed_masses
         if masses:
             with st.spinner("Matching against cached structures..."):
                 raw = run_mass_matching(masses, tolerance)
@@ -271,6 +356,12 @@ else:
     )
     tol_window = st.slider("Position tolerance (residues)", 0, 5, 2, 1)
     run_clicked = st.button("Match Profile", type="primary")
+
+    # No observed masses in this mode -- the gel will show predicted bands
+    # only, with no observed lane, rather than showing stale mass data from
+    # a previous mode.
+    st.session_state["gel_observed_masses"] = None
+    st.session_state["gel_tolerance_pct"] = None
 
     if "match_results" not in st.session_state or run_clicked or st.session_state.get("last_mode") != "position":
         positions = parse_positions(positions_input)
@@ -390,6 +481,41 @@ best_chain = profile["best_chain"] if profile else None
 raw_profile = profile["raw_profile"] if profile else None
 
 rcsb_url = f"https://www.rcsb.org/structure/{selected_pdb}"
+
+# ---------------------------------------------------------------------------
+# Fragment bands -- simulated PK digestion gel. This is the part that
+# actually corresponds to what a researcher gets out of a real bench
+# experiment, so it sits right up front, not buried below the viewer.
+# ---------------------------------------------------------------------------
+st.subheader("Predicted Fragment Bands")
+ladder_info = get_predicted_ladder(selected_pdb)
+predicted_fragments = ladder_info["fragments"] if ladder_info else []
+gel_observed = st.session_state.get("gel_observed_masses")
+gel_tolerance = st.session_state.get("gel_tolerance_pct") or 5.0
+
+if predicted_fragments or gel_observed:
+    gel_fig = draw_fragment_gel(
+        selected_pdb, predicted_fragments,
+        observed_masses=gel_observed, tolerance_pct=gel_tolerance,
+    )
+    st.pyplot(gel_fig, width="content")
+    plt.close(gel_fig)
+
+    gel_caption = (
+        "Simulated Proteinase K digestion, predicted from cached SASA-derived "
+        "cleavage sites -- not an actual gel image. Ladder lane is a generic "
+        "small-fragment size reference, not run alongside this sample."
+    )
+    if gel_observed:
+        gel_caption += (
+            " Green observed bands land within tolerance of a predicted band; "
+            "red ones don't."
+        )
+    st.caption(gel_caption)
+else:
+    st.info(f"No cached SASA profile for {selected_pdb} -- can't predict a digestion ladder.")
+
+st.write("")
 
 # ---------------------------------------------------------------------------
 # Viewer controls -- compact row above the single full-width viewer box
