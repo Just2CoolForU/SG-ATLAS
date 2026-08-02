@@ -18,7 +18,9 @@ import sqlite3
 import pandas as pd
 import streamlit as st
 
-from sg_atlas_fragments import match_observed_fragments, RESIDUE_MASS, WATER_MASS
+from sg_atlas_fragments import (
+    match_observed_fragments, score_all_candidates, RESIDUE_MASS, WATER_MASS,
+)
 
 try:
     from pymol_viewer import render_pdb_3d
@@ -162,6 +164,13 @@ def run_mass_matching(observed_masses_tuple, tolerance_pct):
     )
 
 
+@st.cache_data
+def run_position_matching(observed_fragments_tuple, tolerance_window):
+    return score_all_candidates(
+        list(observed_fragments_tuple), tolerance_window=tolerance_window, db_path=DB_PATH
+    )
+
+
 known_df = load_known_structures()
 curated_df = load_curated_atlas()
 all_ids = load_structure_ids()
@@ -183,40 +192,101 @@ st.markdown(
 )
 
 # ---------------------------------------------------------------------------
-# Matching controls -- the actual input that drives the ranked table
+# Matching controls -- the actual input that drives the ranked table.
+# Two independent modes, matching what sg_atlas_fragments.py supports:
+#   1. Mass weights from MS/gel  -> match_observed_fragments()
+#   2. Residue boundary positions -> score_all_candidates()
+# Visible by default -- this got hidden behind a collapsed expander before,
+# which is why the app looked static. Not doing that again.
 # ---------------------------------------------------------------------------
-with st.expander("Enter observed fragment masses (Da)", expanded=False):
-    st.caption(
-        "Mass-based matching: compares your gel/MS fragment masses against "
-        "every cached structure's predicted Proteinase K digestion ladder."
-    )
-    masses_input = st.text_input(
-        "Observed fragment masses, comma-separated",
-        value="4200, 8100, 12300",
-    )
-    tolerance = st.slider("Match tolerance (%)", 1.0, 15.0, 5.0, 0.5)
-    run_clicked = st.button("Run test again", type="primary")
+st.subheader("Match your data against the cache")
+mode = st.radio(
+    "Input type",
+    ["Mass weights (MS/gel)", "Residue positions (boundaries)"],
+    horizontal=True,
+)
 
 def parse_masses(text):
     out = []
     for tok in text.split(","):
         tok = tok.strip()
-        if not tok:
+        if tok:
+            try:
+                out.append(float(tok))
+            except ValueError:
+                pass
+    return tuple(out)
+
+def parse_positions(text):
+    """Parses 'start-end, start-end' pairs into a tuple of (start, end) ints."""
+    out = []
+    for tok in text.split(","):
+        tok = tok.strip()
+        if not tok or "-" not in tok:
             continue
+        a, _, b = tok.partition("-")
         try:
-            out.append(float(tok))
+            out.append((int(a.strip()), int(b.strip())))
         except ValueError:
             pass
     return tuple(out)
 
-if "match_results" not in st.session_state or run_clicked:
-    masses = parse_masses(masses_input)
-    if masses:
-        with st.spinner("Matching against cached structures..."):
-            st.session_state["match_results"] = run_mass_matching(masses, tolerance)
-            st.session_state["selected_pdb"] = None  # reset selection to top match
-    else:
-        st.session_state["match_results"] = []
+if mode == "Mass weights (MS/gel)":
+    st.caption(
+        "Compares your gel/MS fragment masses against every cached structure's "
+        "predicted Proteinase K digestion ladder."
+    )
+    masses_input = st.text_input(
+        "Observed fragment masses (Da), comma-separated",
+        value="4200, 8100, 12300",
+    )
+    tolerance = st.slider("Match tolerance (%)", 1.0, 15.0, 5.0, 0.5)
+    run_clicked = st.button("Run test again", type="primary")
+
+    if "match_results" not in st.session_state or run_clicked or st.session_state.get("last_mode") != "mass":
+        masses = parse_masses(masses_input)
+        if masses:
+            with st.spinner("Matching against cached structures..."):
+                raw = run_mass_matching(masses, tolerance)
+                st.session_state["match_results"] = [
+                    {"pdb_id": r["pdb_id"], "score": r["score"],
+                     "matched_count": r["matched_count"], "evaluable_count": r["evaluable_count"]}
+                    for r in raw
+                ]
+                st.session_state["last_mode"] = "mass"
+                st.session_state["selected_pdb"] = None
+        else:
+            st.session_state["match_results"] = []
+
+else:
+    st.caption(
+        "Compares observed fragment boundary residues (e.g. from N/C-terminal "
+        "sequencing or a truncation you've mapped) against each cached "
+        "structure's predicted cleavage sites. Uses a binomial test with "
+        "Benjamini-Hochberg FDR correction across all structures."
+    )
+    positions_input = st.text_input(
+        "Observed fragment boundaries, comma-separated pairs (start-end)",
+        value="37-97, 40-90",
+    )
+    tol_window = st.slider("Position tolerance (residues)", 0, 5, 2, 1)
+    run_clicked = st.button("Run test again", type="primary")
+
+    if "match_results" not in st.session_state or run_clicked or st.session_state.get("last_mode") != "position":
+        positions = parse_positions(positions_input)
+        if positions:
+            with st.spinner("Matching against cached structures..."):
+                raw = run_position_matching(positions, tol_window)
+                st.session_state["match_results"] = [
+                    {"pdb_id": r["pdb_id"], "score": r["confidence"],
+                     "matched_count": r["matches"], "evaluable_count": r["trials"],
+                     "low_power_warning": r.get("low_power_warning", False)}
+                    for r in raw
+                ]
+                st.session_state["last_mode"] = "position"
+                st.session_state["selected_pdb"] = None
+        else:
+            st.session_state["match_results"] = []
 
 results = st.session_state.get("match_results", [])
 
@@ -232,13 +302,14 @@ if results:
         disease = disease if isinstance(disease, str) and disease.strip() else "Uncategorized"
         profile = get_structure_profile(pdb_id)
         bounds = f"{profile['residue_range'][0]}-{profile['residue_range'][1]}" if profile else "N/A"
+        flag = " ⚠" if r.get("low_power_warning") else ""
         rows.append({
             "Structure": pdb_id,
             "Polymorph": polymorph,
             "Associated disease": disease,
             "Confidence": r["score"],
             "Bounds (cached)": bounds,
-            "Evaluable": f"{r['matched_count']}/{r['evaluable_count']}",
+            "Evaluable": f"{r['matched_count']}/{r['evaluable_count']}{flag}",
         })
     candidates_df = pd.DataFrame(rows)
     default_pdb = candidates_df.iloc[0]["Structure"]
@@ -323,7 +394,10 @@ with left_col:
             candidates_df,
             column_config={
                 "Confidence": st.column_config.ProgressColumn(
-                    "Confidence", help="Fraction of evaluable observed fragments matched",
+                    "Confidence",
+                    help=("Fraction of evaluable observed masses matched"
+                          if st.session_state.get("last_mode") == "mass"
+                          else "FDR-adjusted statistical confidence (1 - adjusted p-value)"),
                     format="%.2f", min_value=0, max_value=1,
                 ),
                 "Structure": st.column_config.TextColumn("Structure", width="small"),
@@ -332,13 +406,16 @@ with left_col:
             hide_index=True,
             width="stretch",
         )
-        st.caption(
+        caption_text = (
             "Ranked on evaluable coverage first, match quality second -- a structure "
             "tested against more of your real data outranks one that trivially "
             '"wins" by having too little resolved sequence to be meaningfully tested.'
         )
+        if any(r.get("low_power_warning") for r in results):
+            caption_text += "  ⚠ = few trials for this structure; confidence is unreliable at this coverage."
+        st.caption(caption_text)
     else:
-        st.info("Enter observed fragment masses above and run the test to populate this table.")
+        st.info("Enter your observed data above and run the test to populate this table.")
 
 # ---------------------------------------------------------------------------
 # Right column: real cached metadata, honest about what isn't cached
