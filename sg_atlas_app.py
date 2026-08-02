@@ -326,7 +326,10 @@ def parse_positions(text):
 if mode == "Mass weights (MS/gel)":
     st.caption(
         "Compares your gel/MS fragment masses against every cached structure's "
-        "predicted Proteinase K digestion ladder."
+        "predicted Proteinase K digestion ladder. Confidence is a binomial-test "
+        "and FDR-corrected score, not a raw match fraction -- many polymorphs "
+        "share similar core lengths and produce near-identical ladders, so a "
+        "raw fraction alone can't tell a distinctive match from a generic one."
     )
     masses_input = st.text_input(
         "Observed fragment masses (Da), comma-separated",
@@ -349,7 +352,8 @@ if mode == "Mass weights (MS/gel)":
                 raw = run_mass_matching(masses, tolerance)
                 st.session_state["match_results"] = [
                     {"pdb_id": r["pdb_id"], "score": r["score"],
-                     "matched_count": r["matched_count"], "evaluable_count": r["evaluable_count"]}
+                     "matched_count": r["matched_count"], "evaluable_count": r["evaluable_count"],
+                     "low_power_warning": r.get("low_power_warning", False)}
                     for r in raw
                 ]
                 st.session_state["last_mode"] = "mass"
@@ -684,9 +688,8 @@ if not candidates_df.empty:
         column_config={
             "Confidence": st.column_config.ProgressColumn(
                 "Confidence",
-                help=("Fraction of evaluable observed masses matched"
-                      if st.session_state.get("last_mode") == "mass"
-                      else "FDR-adjusted statistical confidence (1 - adjusted p-value)"),
+                help="FDR-adjusted statistical confidence (1 - adjusted p-value), "
+                     "not a raw fraction matched -- see the Match your data caption above.",
                 format="%.2f", min_value=0, max_value=1,
             ),
             "Structure": st.column_config.TextColumn("Structure", width="small"),
