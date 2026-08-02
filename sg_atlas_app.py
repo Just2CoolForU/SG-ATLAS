@@ -20,6 +20,7 @@ import streamlit as st
 
 from sg_atlas_fragments import (
     match_observed_fragments, score_all_candidates, RESIDUE_MASS, WATER_MASS,
+    compute_rsa, predict_cleavage_sites,
 )
 
 try:
@@ -76,11 +77,6 @@ def inject_css():
         .not-cached-note { font-size: 12.5px; color: #888888; margin-top: 6px; }
         .not-cached-note a { color: #1e3c72; }
 
-        .viewer-box {
-            border: 1.5px solid #111111; border-radius: 10px; overflow: hidden;
-            min-height: 420px; display: flex; align-items: center; justify-content: center;
-            background: #fafafa;
-        }
         .viewer-fallback { color: #999999; font-family: sans-serif; text-align: center; padding: 40px; }
 
         .footer-disclaimer { font-size: 12.5px; color: #999999; margin-top: 1.5rem; }
@@ -125,7 +121,7 @@ def get_structure_profile(pdb_id):
     """Everything we can honestly say about a structure from local cache alone."""
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute(
-        "SELECT chain_id, residue, amino_acid FROM residues WHERE pdb_id=? AND mode=?",
+        "SELECT chain_id, residue, amino_acid, sasa FROM residues WHERE pdb_id=? AND mode=?",
         (pdb_id, MODE),
     )
     rows = cur.fetchall()
@@ -139,13 +135,13 @@ def get_structure_profile(pdb_id):
         return None
 
     by_chain = {}
-    for cid, resseq, aa in rows:
-        by_chain.setdefault(cid, {})[resseq] = aa
+    for cid, resseq, aa, sasa in rows:
+        by_chain.setdefault(cid, {})[resseq] = {"aa": aa, "sasa": sasa}
 
     best_chain = max(by_chain, key=lambda c: len(by_chain[c]))
     profile = by_chain[best_chain]
     residues_sorted = sorted(profile.keys())
-    est_mass = sum(RESIDUE_MASS.get(aa, 110.0) for aa in profile.values()) + WATER_MASS
+    est_mass = sum(RESIDUE_MASS.get(d["aa"], 110.0) for d in profile.values()) + WATER_MASS
 
     import json
     core_chain_ids = json.loads(chain_row[0]) if chain_row else list(by_chain.keys())
@@ -157,6 +153,7 @@ def get_structure_profile(pdb_id):
         "core_chain_count": len(core_chain_ids),
         "core_chain_ids": core_chain_ids,
         "est_mass_kda": round(est_mass / 1000, 2),
+        "raw_profile": profile,  # {resseq: {"aa": ..., "sasa": ...}} for the best/core chain
     }
 
 
@@ -365,82 +362,97 @@ if picked != selected_pdb:
     st.session_state["selected_pdb"] = picked
     st.rerun()
 
-left_col, right_col = st.columns([1.7, 1], gap="large")
-
-# Computed once here (cached) and reused by both the viewer and the
-# Macromolecule Content card below, so what you see in 3D and what the
-# card claims about chain count always agree.
+# Computed once here (cached) and reused everywhere below, so the viewer,
+# the metadata card, and the RSA/cleavage overlays never disagree.
 profile = get_structure_profile(selected_pdb)
+core_chains = profile["core_chain_ids"] if profile else None
+best_chain = profile["best_chain"] if profile else None
+raw_profile = profile["raw_profile"] if profile else None
+
+rcsb_url = f"https://www.rcsb.org/structure/{selected_pdb}"
 
 # ---------------------------------------------------------------------------
-# Left column: real 3D viewer + ranked candidates table
+# Viewer controls -- compact row above the single full-width viewer box
 # ---------------------------------------------------------------------------
-with left_col:
-    st.markdown('<div class="viewer-box">', unsafe_allow_html=True)
-    if VIEWER_AVAILABLE:
-        try:
-            core_chains = profile["core_chain_ids"] if profile else None
-            render_pdb_3d(selected_pdb, core_chains=core_chains)
-        except Exception as e:
-            st.markdown(
-                f'<div class="viewer-fallback">Could not load live structure for '
-                f'{selected_pdb} from RCSB ({e}).<br>Check network access from '
-                f'this deployment.</div>',
-                unsafe_allow_html=True,
-            )
-    else:
+vc1, vc2, vc3 = st.columns([1.3, 1.3, 1])
+with vc1:
+    color_mode_label = st.selectbox(
+        "Color by",
+        ["Core chains", "Solvent accessibility (RSA)"],
+        disabled=(profile is None),
+    )
+    color_mode = "rsa" if color_mode_label.startswith("Solvent") else "chain"
+with vc2:
+    show_cleavage = st.checkbox(
+        "Mark predicted PK cleavage sites", value=False, disabled=(profile is None)
+    )
+with vc3:
+    spin = st.checkbox("Auto-rotate", value=False)
+
+cleavage_sites = None
+if show_cleavage and raw_profile:
+    cleavage_sites = predict_cleavage_sites(raw_profile)
+
+# ---------------------------------------------------------------------------
+# Full-width 3D viewer -- a single box (st.iframe supplies its own frame,
+# no extra wrapper div on top of it)
+# ---------------------------------------------------------------------------
+if VIEWER_AVAILABLE:
+    try:
+        render_pdb_3d(
+            selected_pdb,
+            core_chains=core_chains,
+            color_mode=color_mode,
+            profile_chain=best_chain,
+            residue_profile=raw_profile,
+            cleavage_sites=cleavage_sites,
+            spin=spin,
+        )
+    except Exception as e:
         st.markdown(
-            f'<div class="viewer-fallback">3D viewer import failed.<br>'
-            f'<code>{VIEWER_IMPORT_ERROR}</code><br><br>'
-            f'Check "Manage app" &rarr; logs on Streamlit Cloud for the full '
-            f'traceback if this doesn\'t explain it.</div>',
+            f'<div class="viewer-fallback">Could not load live structure for '
+            f'{selected_pdb} from RCSB ({e}).<br>Check network access from '
+            f'this deployment.</div>',
             unsafe_allow_html=True,
         )
-    st.markdown('</div>', unsafe_allow_html=True)
-    if profile:
+else:
+    st.markdown(
+        f'<div class="viewer-fallback">3D viewer import failed.<br>'
+        f'<code>{VIEWER_IMPORT_ERROR}</code><br><br>'
+        f'Check "Manage app" &rarr; logs on Streamlit Cloud for the full '
+        f'traceback if this doesn\'t explain it.</div>',
+        unsafe_allow_html=True,
+    )
+
+if profile:
+    if color_mode == "rsa":
+        st.caption(
+            f"Chain {best_chain} colored by Relative Solvent Accessibility: "
+            f"blue = buried, red = exposed. Other core chains "
+            f"({', '.join(c for c in profile['core_chain_ids'] if c != best_chain)}) "
+            f"shown in grey -- SASA is only cached for one representative chain per "
+            f"structure, not verified per-chain."
+            + (" Black spheres mark predicted PK cleavage sites." if cleavage_sites else "")
+        )
+    else:
         st.caption(
             f"Colored chains ({', '.join(profile['core_chain_ids'])}) are the "
             f"core-shielded region SG-ATLAS actually computed a SASA profile for. "
             f"Grey chains are part of the deposited assembly but weren't included "
             f"in this analysis."
+            + (" Black spheres mark predicted PK cleavage sites." if cleavage_sites else "")
         )
-    else:
-        st.caption(f"No cached SASA profile for {selected_pdb} -- showing the raw deposited structure.")
+else:
+    st.caption(f"No cached SASA profile for {selected_pdb} -- showing the raw deposited structure.")
 
-    st.write("")
-    st.subheader("All candidates, ranked by confidence")
-    if not candidates_df.empty:
-        st.dataframe(
-            candidates_df,
-            column_config={
-                "Confidence": st.column_config.ProgressColumn(
-                    "Confidence",
-                    help=("Fraction of evaluable observed masses matched"
-                          if st.session_state.get("last_mode") == "mass"
-                          else "FDR-adjusted statistical confidence (1 - adjusted p-value)"),
-                    format="%.2f", min_value=0, max_value=1,
-                ),
-                "Structure": st.column_config.TextColumn("Structure", width="small"),
-                "Bounds (cached)": st.column_config.TextColumn("Bounds (cached)", width="small"),
-            },
-            hide_index=True,
-            width="stretch",
-        )
-        caption_text = (
-            "Ranked on evaluable coverage first, match quality second -- a structure "
-            "tested against more of your real data outranks one that trivially "
-            '"wins" by having too little resolved sequence to be meaningfully tested.'
-        )
-        if any(r.get("low_power_warning") for r in results):
-            caption_text += "  ⚠ = few trials for this structure; confidence is unreliable at this coverage."
-        st.caption(caption_text)
-    else:
-        st.info("Enter your observed data above and run the test to populate this table.")
+st.write("")
 
 # ---------------------------------------------------------------------------
-# Right column: real cached metadata, honest about what isn't cached
+# Info cards, underneath the viewer, two per row
 # ---------------------------------------------------------------------------
-with right_col:
+info_col1, info_col2 = st.columns(2, gap="large")
+
+with info_col1:
     with st.expander("About this Structure", expanded=True):
         if not curated_row.empty:
             row = curated_row.iloc[0]
@@ -449,7 +461,6 @@ with right_col:
                 st.caption(f"{row['citation_title']} ({row.get('journal', '')}, {row.get('year', '')})")
         else:
             st.write(f"**{selected_pdb}** has no curated summary in known_structures.csv yet.")
-        rcsb_url = f"https://www.rcsb.org/structure/{selected_pdb}"
         st.markdown(f"[View full entry on RCSB]({rcsb_url})")
 
     with st.container(border=True):
@@ -475,6 +486,7 @@ with right_col:
         else:
             st.markdown('<div class="detail-value na">Not cached for this structure</div>', unsafe_allow_html=True)
 
+with info_col2:
     with st.container(border=True):
         st.markdown('<div class="card-title">Experimental Data</div>', unsafe_allow_html=True)
         resolution = curated_row["resolution"].iloc[0] if not curated_row.empty else None
@@ -505,6 +517,40 @@ with right_col:
             f'<a href="{rcsb_url}" target="_blank">Full Validation Report on RCSB</a></div>',
             unsafe_allow_html=True,
         )
+
+st.write("")
+
+# ---------------------------------------------------------------------------
+# Candidates table, full width, underneath everything
+# ---------------------------------------------------------------------------
+st.subheader("All candidates, ranked by confidence")
+if not candidates_df.empty:
+    st.dataframe(
+        candidates_df,
+        column_config={
+            "Confidence": st.column_config.ProgressColumn(
+                "Confidence",
+                help=("Fraction of evaluable observed masses matched"
+                      if st.session_state.get("last_mode") == "mass"
+                      else "FDR-adjusted statistical confidence (1 - adjusted p-value)"),
+                format="%.2f", min_value=0, max_value=1,
+            ),
+            "Structure": st.column_config.TextColumn("Structure", width="small"),
+            "Bounds (cached)": st.column_config.TextColumn("Bounds (cached)", width="small"),
+        },
+        hide_index=True,
+        width="stretch",
+    )
+    caption_text = (
+        "Ranked on evaluable coverage first, match quality second -- a structure "
+        "tested against more of your real data outranks one that trivially "
+        '"wins" by having too little resolved sequence to be meaningfully tested.'
+    )
+    if any(r.get("low_power_warning") for r in results):
+        caption_text += "  ⚠ = few trials for this structure; confidence is unreliable at this coverage."
+    st.caption(caption_text)
+else:
+    st.info("Enter your observed data above and run the test to populate this table.")
 
 st.markdown(
     '<div class="footer-disclaimer">SG-ATLAS is a hypothesis-generation aid for choosing '
