@@ -14,6 +14,8 @@ a number we don't actually have. Fields not present in the local cache
 values.
 """
 
+import os
+import base64
 import sqlite3
 import pandas as pd
 import numpy as np
