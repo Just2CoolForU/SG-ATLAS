@@ -112,8 +112,7 @@ def inject_global_css():
         in stacking order. Making it transparent alone left its hit area
         intact, which was silently swallowing clicks aimed at the top nav
         buttons right underneath it. Dropping its z-index below the nav's
-        (and disabling pointer events on everything except the icons users
-        still need, like Share/GitHub) fixes clicks without hiding those
+        (and raising the nav's z-index) fixes clicks without hiding those
         controls. */
         header[data-testid="stHeader"] {{
             background: transparent;
@@ -190,18 +189,30 @@ def inject_global_css():
         }}
 
         /* ---- Floating crystal background ------------------------------ */
+        /* Each of the 4 crystal SVGs (assets/crystal_1-4.svg) is a single
+        wireframe gem, tightly cropped to its own content -- see the repo's
+        asset-prep notes. Position/size is set per-layer here (not a shared
+        inset:0 rule) so 3 crystals bleed off the hero's edges and one sits
+        large and mostly-visible near the title, matching the approved
+        reference mockup. Opacity (not `stroke`) is what lightens these
+        toward the site's gray token: the crystal art is a masked raster
+        image inside each SVG, not vector <path stroke="...">, so a CSS
+        `stroke` override has nothing to attach to -- opacity against the
+        white page background is what gets the right visual weight. */
         .sg-crystal-layer {{
             position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
             pointer-events: none;
+            opacity: 0.38;
         }}
         .sg-crystal-layer svg {{
-            width: 100% !important;
-            height: 100% !important;
+            width: 100%;
+            height: 100%;
             display: block;
         }}
+        .sg-crystal-1 {{ top: -16%; right: -8%; width: 17%; height: 60%; }}
+        .sg-crystal-2 {{ top: 2%; left: 18%; width: 20%; height: 72%; z-index: 1; }}
+        .sg-crystal-3 {{ bottom: -14%; left: -10%; width: 19%; height: 66%; }}
+        .sg-crystal-4 {{ bottom: -30%; right: 20%; width: 16%; height: 58%; }}
         @keyframes sgFloatA {{
             0%   {{ transform: translate(0px, 0px) rotate(0deg); }}
             50%  {{ transform: translate(6px, -14px) rotate(1.6deg); }}
@@ -290,11 +301,14 @@ def render_top_nav(pages, active=None):
 
 
 # ---------------------------------------------------------------------------
-# Floating crystal background -- reads the four original SVG exports
-# (each one is the *same* master sprite, differently cropped/transformed
-# into a shared 1440x810 canvas) and layers them so the reproduction
-# matches the source site pixel-for-pixel, then wraps each in a slow
-# independent float/rotate animation.
+# Floating crystal background -- reads 4 SVG assets (assets/crystal_1-4.svg),
+# each a single wireframe gem already cropped tightly to its own content and
+# scaled to fill its box via preserveAspectRatio="none" (baked into the file,
+# not rewritten here). Position/size for each is set in CSS (.sg-crystal-1
+# through -4, see inject_global_css) rather than a shared inset:0 rule, so 3
+# crystals bleed off the hero's edges and one sits large behind the title --
+# matching the approved reference mockup, not just tiling one full-bleed
+# sprite behind everything.
 # ---------------------------------------------------------------------------
 _CRYSTAL_FILES = ["crystal_1.svg", "crystal_2.svg", "crystal_3.svg", "crystal_4.svg"]
 
@@ -306,19 +320,9 @@ def _load_crystal_svgs():
         path = os.path.join(ASSETS_DIR, fname)
         try:
             with open(path, "r", encoding="utf-8") as f:
-                raw = f.read()
+                svgs.append(f.read())
         except FileNotFoundError:
             svgs.append(None)
-            continue
-        # The source export hardcodes width="1920" height="1080" and
-        # preserveAspectRatio="xMidYMid meet" (fit-inside, can letterbox).
-        # The hero container's aspect ratio won't always match 1440:810
-        # exactly (mobile stacking changes it), so switch to "slice" -- the
-        # SVG equivalent of CSS background-size:cover -- so the artwork
-        # always fully covers the hero with no gaps, cropped centrally.
-        # Sizing itself is left to the CSS width/height:100% rule.
-        raw = raw.replace('preserveAspectRatio="xMidYMid meet"', 'preserveAspectRatio="xMidYMid slice"')
-        svgs.append(raw)
     return svgs
 
 
