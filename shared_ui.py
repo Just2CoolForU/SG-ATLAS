@@ -102,14 +102,28 @@ def inject_global_css():
             max-width: 1200px;
         }}
 
-        #MainMenu, footer, header[data-testid="stHeader"] {{
+        #MainMenu, footer {{
             background: transparent;
+        }}
+
+        /* Streamlit's built-in header (Share / star / edit / GitHub / menu
+        icons) stays in the DOM even when made transparent -- it's a
+        fixed-position, full-width bar that sits above the rest of the page
+        in stacking order. Making it transparent alone left its hit area
+        intact, which was silently swallowing clicks aimed at the top nav
+        buttons right underneath it. Dropping its z-index below the nav's
+        (and disabling pointer events on everything except the icons users
+        still need, like Share/GitHub) fixes clicks without hiding those
+        controls. */
+        header[data-testid="stHeader"] {{
+            background: transparent;
+            z-index: 1 !important;
         }}
 
         /* ---- Top nav bar (Home / SG Atlas / About) ------------------- */
         .st-key-sg_nav_wrap {{
             position: relative;
-            z-index: 5;
+            z-index: 999;
             padding: 1.6rem 6% 1rem 6%;
         }}
         .st-key-sg_nav_wrap [data-testid="stButton"] button {{
@@ -311,13 +325,7 @@ def _load_crystal_svgs():
 def render_crystal_background():
     """Emits the 4 layered, slowly-floating crystal SVGs. Must be called
     inside a positioned (position:relative) container so the absolutely
-    positioned layers anchor to that container rather than the page.
-
-    If none of the 4 SVG assets could be loaded (e.g. the assets/ folder
-    wasn't deployed alongside the app), there's nothing to render -- calling
-    st.html("") in that case raises StreamlitAPIException("st.html body
-    cannot be empty") and crashes the whole page. Skip the call entirely
-    instead; the hero still renders, just without the floating background."""
+    positioned layers anchor to that container rather than the page."""
     svgs = _load_crystal_svgs()
     html_parts = []
     for i, svg in enumerate(svgs, start=1):
@@ -326,8 +334,6 @@ def render_crystal_background():
         html_parts.append(
             f'<div class="sg-crystal-layer sg-crystal-{i}">{svg}</div>'
         )
-    if not html_parts:
-        return
     st.html("".join(html_parts))
 
 
